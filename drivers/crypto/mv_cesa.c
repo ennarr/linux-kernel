@@ -1073,6 +1073,7 @@ static int mv_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_thread;
 
+	writel(0, cpg->reg + SEC_ACCEL_INT_STATUS);
 	writel(SEC_INT_ACCEL0_DONE, cpg->reg + SEC_ACCEL_INT_MASK);
 	writel(SEC_CFG_STOP_DIG_ERR, cpg->reg + SEC_ACCEL_CFG);
 	writel(SRAM_CONFIG, cpg->reg + SEC_ACCEL_DESC_P0);
