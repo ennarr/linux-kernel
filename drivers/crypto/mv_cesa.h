@@ -29,13 +29,6 @@
 #define SEC_ST_ACT_0		(1 << 0)
 #define SEC_ST_ACT_1		(1 << 1)
 
-/*
- * FPGA_INT_STATUS looks like a FPGA leftover and is documented only in Errata
- * 4.12. It looks like that it was part of an IRQ-controller in FPGA and
- * someone forgot to remove  it while switching to the core and moving to
- * SEC_ACCEL_INT_STATUS.
- */
-#define FPGA_INT_STATUS		0xdd68
 #define SEC_ACCEL_INT_STATUS	0xde20
 #define SEC_INT_AUTH_DONE	(1 << 0)
 #define SEC_INT_DES_E_DONE	(1 << 1)

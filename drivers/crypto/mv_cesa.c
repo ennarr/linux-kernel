@@ -908,7 +908,6 @@ irqreturn_t crypto_int(int irq, void *priv)
 		       "got an interrupt but no pending timer?\n");
 	}
 	val &= ~SEC_INT_ACCEL0_DONE;
-	writel(val, cpg->reg + FPGA_INT_STATUS);
 	writel(val, cpg->reg + SEC_ACCEL_INT_STATUS);
 	BUG_ON(cpg->eng_st != ENGINE_BUSY);
 	cpg->eng_st = ENGINE_W_DEQUEUE;
