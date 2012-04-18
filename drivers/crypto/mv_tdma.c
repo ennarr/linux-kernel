@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 
 #include "mv_tdma.h"
+#include "dma_desclist.h"
 
 #define MV_TDMA "MV-TDMA: "
 
@@ -30,57 +31,17 @@ struct tdma_desc {
 	u32 next;
 } __attribute__((packed));
 
-struct desc_mempair {
-	struct tdma_desc *vaddr;
-	dma_addr_t daddr;
-};
-
 struct tdma_priv {
 	struct device *dev;
 	void __iomem *reg;
 	int irq;
 	/* protecting the dma descriptors and stuff */
 	spinlock_t lock;
-	struct dma_pool *descpool;
-	struct desc_mempair *desclist;
-	int desclist_len;
-	int desc_usage;
+	struct dma_desclist desclist;
 } tpg;
 
-#define DESC(x)		(tpg.desclist[x].vaddr)
-#define DESC_DMA(x)	(tpg.desclist[x].daddr)
-
-static inline int set_poolsize(int nelem)
-{
-	/* need to increase size first if requested */
-	if (nelem > tpg.desclist_len) {
-		struct desc_mempair *newmem;
-		int newsize = nelem * sizeof(struct desc_mempair);
-
-		newmem = krealloc(tpg.desclist, newsize, GFP_KERNEL);
-		if (!newmem)
-			return -ENOMEM;
-		tpg.desclist = newmem;
-	}
-
-	/* allocate/free dma descriptors, adjusting tpg.desclist_len on the go */
-	for (; tpg.desclist_len < nelem; tpg.desclist_len++) {
-		DESC(tpg.desclist_len) = dma_pool_alloc(tpg.descpool,
-				GFP_KERNEL, &DESC_DMA(tpg.desclist_len));
-		if (!DESC((tpg.desclist_len)))
-			return -ENOMEM;
-	}
-	for (; tpg.desclist_len > nelem; tpg.desclist_len--)
-		dma_pool_free(tpg.descpool, DESC(tpg.desclist_len - 1),
-				DESC_DMA(tpg.desclist_len - 1));
-
-	/* ignore size decreases but those to zero */
-	if (!nelem) {
-		kfree(tpg.desclist);
-		tpg.desclist = 0;
-	}
-	return 0;
-}
+#define ITEM(x)		((struct tdma_desc *)DESCLIST_ITEM(tpg.desclist, x))
+#define ITEM_DMA(x)	DESCLIST_ITEM_DMA(tpg.desclist, x)
 
 static inline void wait_for_tdma_idle(void)
 {
@@ -100,17 +61,18 @@ static inline void switch_tdma_engine(bool state)
 
 static struct tdma_desc *get_new_last_desc(void)
 {
-	if (unlikely(tpg.desc_usage == tpg.desclist_len) &&
-	    set_poolsize(tpg.desclist_len << 1)) {
-		printk(KERN_ERR MV_TDMA "failed to increase DMA pool to %d\n",
-				tpg.desclist_len << 1);
+	if (unlikely(DESCLIST_FULL(tpg.desclist)) &&
+	    set_dma_desclist_size(&tpg.desclist, tpg.desclist.length << 1)) {
+		printk(KERN_ERR MV_TDMA "failed to increase DMA pool to %lu\n",
+				tpg.desclist.length << 1);
 		return NULL;
 	}
 
-	if (likely(tpg.desc_usage))
-		DESC(tpg.desc_usage - 1)->next = DESC_DMA(tpg.desc_usage);
+	if (likely(tpg.desclist.usage))
+		ITEM(tpg.desclist.usage - 1)->next =
+			ITEM_DMA(tpg.desclist.usage);
 
-	return DESC(tpg.desc_usage++);
+	return ITEM(tpg.desclist.usage++);
 }
 
 static inline void mv_tdma_desc_dump(void)
@@ -118,17 +80,17 @@ static inline void mv_tdma_desc_dump(void)
 	struct tdma_desc *tmp;
 	int i;
 
-	if (!tpg.desc_usage) {
+	if (!tpg.desclist.usage) {
 		printk(KERN_WARNING MV_TDMA "DMA descriptor list is empty\n");
 		return;
 	}
 
 	printk(KERN_WARNING MV_TDMA "DMA descriptor list:\n");
-	for (i = 0; i < tpg.desc_usage; i++) {
-		tmp = DESC(i);
+	for (i = 0; i < tpg.desclist.usage; i++) {
+		tmp = ITEM(i);
 		printk(KERN_WARNING MV_TDMA "entry %d at 0x%x: dma addr 0x%x, "
 		       "src 0x%x, dst 0x%x, count %u, own %d, next 0x%x", i,
-		       (u32)tmp, DESC_DMA(i) , tmp->src, tmp->dst,
+		       (u32)tmp, ITEM_DMA(i) , tmp->src, tmp->dst,
 		       tmp->count & ~TDMA_OWN_BIT, !!(tmp->count & TDMA_OWN_BIT),
 		       tmp->next);
 	}
@@ -167,7 +129,7 @@ void mv_tdma_clear(void)
 	writel(0, tpg.reg + TDMA_CURR_DESC);
 	writel(0, tpg.reg + TDMA_NEXT_DESC);
 
-	tpg.desc_usage = 0;
+	tpg.desclist.usage = 0;
 
 	switch_tdma_engine(1);
 
@@ -183,7 +145,7 @@ void mv_tdma_trigger(void)
 
 	spin_lock(&tpg.lock);
 
-	writel(DESC_DMA(0), tpg.reg + TDMA_NEXT_DESC);
+	writel(ITEM_DMA(0), tpg.reg + TDMA_NEXT_DESC);
 
 	spin_unlock(&tpg.lock);
 }
@@ -287,13 +249,15 @@ static int mv_probe(struct platform_device *pdev)
 		goto out_unmap_reg;
 	}
 
-	tpg.descpool = dma_pool_create("TDMA Descriptor Pool", tpg.dev,
-			sizeof(struct tdma_desc), MV_DMA_ALIGN, 0);
-	if (!tpg.descpool) {
+	if (init_dma_desclist(&tpg.desclist, tpg.dev,
+			sizeof(struct tdma_desc), MV_DMA_ALIGN, 0)) {
 		rc = -ENOMEM;
 		goto out_free_irq;
 	}
-	set_poolsize(MV_DMA_INIT_POOLSIZE);
+	if (set_dma_desclist_size(&tpg.desclist, MV_DMA_INIT_POOLSIZE)) {
+		rc = -ENOMEM;
+		goto out_free_desclist;
+	}
 
 	platform_set_drvdata(pdev, &tpg);
 
@@ -327,8 +291,8 @@ static int mv_probe(struct platform_device *pdev)
 out_free_all:
 	switch_tdma_engine(0);
 	platform_set_drvdata(pdev, NULL);
-	set_poolsize(0);
-	dma_pool_destroy(tpg.descpool);
+out_free_desclist:
+	fini_dma_desclist(&tpg.desclist);
 out_free_irq:
 	free_irq(tpg.irq, &tpg);
 out_unmap_reg:
@@ -341,8 +305,7 @@ static int mv_remove(struct platform_device *pdev)
 {
 	switch_tdma_engine(0);
 	platform_set_drvdata(pdev, NULL);
-	set_poolsize(0);
-	dma_pool_destroy(tpg.descpool);
+	fini_dma_desclist(&tpg.desclist);
 	free_irq(tpg.irq, &tpg);
 	iounmap(tpg.reg);
 	tpg.dev = NULL;
