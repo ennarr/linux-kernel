@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <crypto/internal/hash.h>
 #include <crypto/sha.h>
+#include <crypto/md5.h>
 
 #include "mv_cesa.h"
 #include "mv_tdma.h"
@@ -129,6 +130,8 @@ struct crypto_priv {
 	dma_addr_t sa_sram_dma;
 
 	struct dma_desclist desclist;
+	int has_md5;
+	int has_hmac_md5;
 };
 
 static struct crypto_priv *cpg;
@@ -155,7 +158,9 @@ struct mv_req_ctx {
 
 enum hash_op {
 	COP_SHA1,
-	COP_HMAC_SHA1
+	COP_HMAC_SHA1, 
+	COP_MD5, 
+	COP_HMAC_MD5
 };
 
 struct mv_tfm_hash_ctx {
@@ -462,6 +467,14 @@ static void mv_init_hash_config(struct ahash_request *req)
 		memcpy(cpg->sa_sram.sa_ivi,
 				tfm_ctx->ivs, sizeof(tfm_ctx->ivs));
 		break;
+	case COP_MD5:
+		op->config = CFG_OP_MAC_ONLY | CFG_MACM_MD5;
+		break;
+	case COP_HMAC_MD5:
+		op->config = CFG_OP_MAC_ONLY | CFG_MACM_HMAC_MD5;
+		memcpy(cpg->sram + SRAM_HMAC_IV_IN,
+				tfm_ctx->ivs, sizeof(tfm_ctx->ivs));
+		break;
 	}
 
 	op->mac_src_p =
@@ -547,30 +560,47 @@ static inline int mv_hash_import_sha1_ctx(const struct mv_req_hash_ctx *ctx,
 	return crypto_shash_import(desc, &shash_state);
 }
 
+static inline int mv_hash_import_md5_ctx(const struct mv_req_hash_ctx *ctx,
+					  struct shash_desc *desc)
+{
+	int i;
+	struct md5_state shash_state;
+
+	shash_state.byte_count = ctx->count + ctx->count_add;
+	for (i = 0; i < 4; i++)
+		shash_state.hash[i] = ctx->state[i];
+	memcpy(shash_state.block, ctx->buffer, sizeof(shash_state.block));
+	return crypto_shash_import(desc, &shash_state);
+}
+
 static int mv_hash_final_fallback(struct ahash_request *req)
 {
 	const struct mv_tfm_hash_ctx *tfm_ctx = crypto_tfm_ctx(req->base.tfm);
 	struct mv_req_hash_ctx *req_ctx = ahash_request_ctx(req);
-	struct {
-		struct shash_desc shash;
-		char ctx[crypto_shash_descsize(tfm_ctx->fallback)];
-	} desc;
+	struct shash_desc shash;
 	int rc;
 
-	desc.shash.tfm = tfm_ctx->fallback;
-	desc.shash.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+	shash.tfm = tfm_ctx->fallback;
+	shash.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 	if (unlikely(req_ctx->first_hash)) {
-		crypto_shash_init(&desc.shash);
-		crypto_shash_update(&desc.shash, req_ctx->buffer,
+		crypto_shash_init(&shash);
+		crypto_shash_update(&shash, req_ctx->buffer,
 				    req_ctx->extra_bytes);
 	} else {
-		/* only SHA1 for now....
-		 */
-		rc = mv_hash_import_sha1_ctx(req_ctx, &desc.shash);
+	  	switch (req_ctx->op) {
+		case COP_SHA1:
+		case COP_HMAC_SHA1:
+			rc = mv_hash_import_sha1_ctx(req_ctx, &shash);
+		break;
+		case COP_MD5:
+		case COP_HMAC_MD5:
+			rc = mv_hash_import_md5_ctx(req_ctx, &shash);
+		break;
 		if (rc)
 			goto out;
+		}
 	}
-	rc = crypto_shash_final(&desc.shash, req->result);
+	rc = crypto_shash_final(&shash, req->result);
 out:
 	return rc;
 }
@@ -1093,6 +1123,16 @@ static void mv_cra_hash_exit(struct crypto_tfm *tfm)
 		crypto_free_shash(ctx->base_hash);
 }
 
+static int mv_cra_hash_md5_init(struct crypto_tfm *tfm)
+{
+	return mv_cra_hash_init(tfm, NULL, COP_MD5, 0);
+}
+
+static int mv_cra_hash_hmac_md5_init(struct crypto_tfm *tfm)
+{
+	return mv_cra_hash_init(tfm, "md5", COP_HMAC_MD5, SHA1_BLOCK_SIZE);
+}
+
 static int mv_cra_hash_sha1_init(struct crypto_tfm *tfm)
 {
 	return mv_cra_hash_init(tfm, NULL, COP_SHA1, 0);
@@ -1219,6 +1259,54 @@ struct ahash_alg mv_hmac_sha1_alg = {
 		 }
 };
 
+struct ahash_alg mv_md5_alg = {
+	.init = mv_hash_init,
+	.update = mv_hash_update,
+	.final = mv_hash_final,
+	.finup = mv_hash_finup,
+	.digest = mv_hash_digest,
+	.halg = {
+		 .digestsize = MD5_DIGEST_SIZE,
+		 .base = {
+			  .cra_name = "md5",
+			  .cra_driver_name = "mv-md5",
+			  .cra_priority = 300,
+			  .cra_flags =
+			  CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK,
+			  .cra_blocksize = SHA1_BLOCK_SIZE,
+			  .cra_ctxsize = sizeof(struct mv_tfm_hash_ctx),
+			  .cra_init = mv_cra_hash_md5_init,
+			  .cra_exit = mv_cra_hash_exit,
+			  .cra_module = THIS_MODULE,
+			  }
+		 }
+};
+
+struct ahash_alg mv_hmac_md5_alg = {
+	.init = mv_hash_init,
+	.update = mv_hash_update,
+	.final = mv_hash_final,
+	.finup = mv_hash_finup,
+	.digest = mv_hash_digest,
+	.setkey = mv_hash_setkey,
+	.halg = {
+		 .digestsize = MD5_DIGEST_SIZE,
+		 .base = {
+			  .cra_name = "hmac(md5)",
+			  .cra_driver_name = "mv-hmac-md5",
+			  .cra_priority = 300,
+			  .cra_flags =
+			  CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK,
+			  .cra_blocksize = SHA1_BLOCK_SIZE,
+			  .cra_ctxsize = sizeof(struct mv_tfm_hash_ctx),
+			  .cra_init = mv_cra_hash_hmac_md5_init,
+			  .cra_exit = mv_cra_hash_exit,
+			  .cra_module = THIS_MODULE,
+			  }
+		 }
+};
+
+
 static int mv_probe(struct platform_device *pdev)
 {
 	struct crypto_priv *cp;
@@ -1330,6 +1418,20 @@ static int mv_probe(struct platform_device *pdev)
 		       "Could not register hmac-sha1 driver\n");
 	}
 
+	ret = crypto_register_ahash(&mv_md5_alg);
+	if (ret == 0)
+		cpg->has_md5 = 1;
+	else
+		printk(KERN_WARNING MV_CESA "Could not register md5 driver\n");
+
+	ret = crypto_register_ahash(&mv_hmac_md5_alg);
+	if (ret == 0) {
+		cpg->has_hmac_md5 = 1;
+	} else {
+		printk(KERN_WARNING MV_CESA
+		       "Could not register hmac-md5 driver\n");
+	}
+
 	return 0;
 err_unreg_ecb:
 	crypto_unregister_alg(&mv_aes_alg_ecb);
@@ -1362,6 +1464,10 @@ static int mv_remove(struct platform_device *pdev)
 		crypto_unregister_ahash(&mv_sha1_alg);
 	if (cp->has_hmac_sha1)
 		crypto_unregister_ahash(&mv_hmac_sha1_alg);
+	if (cp->has_md5)
+		crypto_unregister_ahash(&mv_md5_alg);
+	if (cp->has_hmac_md5)
+		crypto_unregister_ahash(&mv_hmac_md5_alg);
 	kthread_stop(cp->queue_th);
 	free_irq(cp->irq, cp);
 	dma_unmap_single(&pdev->dev, cpg->sa_sram_dma,
