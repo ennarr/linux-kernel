@@ -268,9 +268,42 @@ void __init kirkwood_uart1_init(void)
 /*****************************************************************************
  * Cryptographic Engines and Security Accelerator (CESA)
  ****************************************************************************/
+static struct resource kirkwood_tdma_res[] = {
+	{
+		.name	= "regs deco",
+		.start	= CRYPTO_PHYS_BASE + 0xA00,
+		.end	= CRYPTO_PHYS_BASE + 0xA24,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.name	= "regs control and error",
+		.start	= CRYPTO_PHYS_BASE + 0x800,
+		.end	= CRYPTO_PHYS_BASE + 0x8CF,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.name   = "crypto error",
+		.start  = IRQ_KIRKWOOD_TDMA_ERR,
+		.end    = IRQ_KIRKWOOD_TDMA_ERR,
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+static u64 mv_tdma_dma_mask = 0xffffffffUL;
+
+static struct platform_device kirkwood_tdma_device = {
+	.name		= "mv_tdma",
+	.id		= -1,
+	.dev		= {
+		.dma_mask		= &mv_tdma_dma_mask,
+		.coherent_dma_mask	= 0xffffffff,
+	},
+	.num_resources	= ARRAY_SIZE(kirkwood_tdma_res),
+	.resource	= kirkwood_tdma_res,
+};
+
 void __init kirkwood_crypto_init(void)
 {
 	kirkwood_clk_ctrl |= CGC_CRYPTO;
+	platform_device_register(&kirkwood_tdma_device);
 	orion_crypto_init(CRYPTO_PHYS_BASE, KIRKWOOD_SRAM_PHYS_BASE,
 			  KIRKWOOD_SRAM_SIZE, IRQ_KIRKWOOD_CRYPTO);
 }

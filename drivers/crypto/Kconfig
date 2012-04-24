@@ -158,12 +158,17 @@ config CRYPTO_GHASH_S390
 
 	  It is available as of z196.
 
+config CRYPTO_DEV_MV_TDMA
+	tristate
+	default no
+
 config CRYPTO_DEV_MV_CESA
 	tristate "Marvell's Cryptographic Engine"
 	depends on PLAT_ORION
 	select CRYPTO_ALGAPI
 	select CRYPTO_AES
 	select CRYPTO_BLKCIPHER2
+	select CRYPTO_DEV_MV_TDMA
 	help
 	  This driver allows you to utilize the Cryptographic Engines and
 	  Security Accelerator (CESA) which can be found on the Marvell Orion
