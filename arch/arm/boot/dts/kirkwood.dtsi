@@ -194,5 +194,16 @@
 			clocks = <&gate_clk 17>;
 			status = "okay";
 		};
+		
+		dma@30800 {
+			compatible = "marvell,orion-dma";
+			reg = <0x30800 0x100>,
+			      <0x30A00 0x100>;
+			reg-names = "regs control and error",
+				    "regs deco";
+			interrupts = <49>;
+			clocks = <&gate_clk 17>;
+			status = "okay";
+		};
 	};
 };
