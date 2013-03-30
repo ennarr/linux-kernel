@@ -18,6 +18,9 @@
 #include <linux/platform_device.h>
 #include <linux/mbus.h>
 #include <plat/mv_dma.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/of_irq.h>
 
 #include "mv_dma.h"
 #include "dma_desclist.h"
@@ -418,7 +421,10 @@ static int mv_init_engine(struct platform_device *pdev, u32 ctrl_init_val,
 	}
 
 	/* get the IRQ */
-	tpg.irq = platform_get_irq(pdev, 0);
+        if (pdev->dev.of_node)
+                tpg.irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+        else
+                tpg.irq = platform_get_irq(pdev, 0);
 	if (tpg.irq < 0 || tpg.irq == NO_IRQ) {
 		rc = -ENXIO;
 		goto out_unmap_reg;
@@ -531,12 +537,17 @@ static int mv_probe_idma(struct platform_device *pdev)
 	return 0;
 }
 
+static const struct of_device_id mv_dma_of_match_table[] = {
+        { .compatible = "marvell,orion-dma", },
+        {}
+};
 static struct platform_driver marvell_tdma = {
 	.probe          = mv_probe_tdma,
 	.remove         = mv_remove,
 	.driver         = {
 		.owner  = THIS_MODULE,
 		.name   = "mv_tdma",
+		.of_match_table = of_match_ptr(mv_dma_of_match_table),
 	},
 }, marvell_idma = {
 	.probe          = mv_probe_idma,
@@ -544,6 +555,7 @@ static struct platform_driver marvell_tdma = {
 	.driver         = {
 		.owner  = THIS_MODULE,
 		.name   = "mv_idma",
+		.of_match_table = of_match_ptr(mv_dma_of_match_table),
 	},
 };
 MODULE_ALIAS("platform:mv_tdma");
